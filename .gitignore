@@ -1,0 +1,69 @@
+# ============================================================
+# SECRETS — NEVER COMMIT
+# ============================================================
+strava_tokens.json
+client.secret
+mdpclient.secret
+*.secret
+*.key
+.env
+.env.*
+
+# ============================================================
+# Strava data caches — only the since-March data is published
+# ============================================================
+# OUT: full activity summary (covers 2018→now) and any 2025 derivatives
+strava_activities.json
+strava_streams_2025.json
+routes_2025.png
+sunburst_2025.png
+sunburst_2025_donut.png
+
+# (kept IN: strava_streams.json — that's already only the 39
+#  activities since 1 March 2026)
+
+# marimo session backup
+backupStravaAnalysis.py.json
+
+# Also keep out the old Jupyter notebooks / pre-2026 CSVs
+Lola's Strava.ipynb
+StravaAnalysis.ipynb
+strava1.csv
+activites.csv
+
+# ============================================================
+# Marimo runtime
+# ============================================================
+__marimo__/
+
+# ============================================================
+# Old / scratch files
+# ============================================================
+StravaAnalysis copy.py
+Untitled.ipynb
+.ipynb_checkpoints/
+
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.python-version
+
+# ============================================================
+# macOS
+# ============================================================
+.DS_Store
+
+# ============================================================
+# Build / outputs you may not want to publish
+# (the shirt PNGs/SVGs and sunburst PNGs are kept by default —
+#  delete the # to gitignore them)
+# ============================================================
+# shirt_*.svg
+# shirt_*.png
+# sunburst_*.png
+# routes_2025.png
