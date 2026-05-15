@@ -48,9 +48,15 @@ TYPE_COLORS = {
     "Ride": "#a855f7", "RockClimbing": "#d98c5f", "Workout": "#8a8a8a",
 }
 
+# folder layout (matches the notebook)
+IMAGES_DIR = os.path.join(FOLDER, "Images")
+STRAVA_STREAMS_DIR = os.path.join(FOLDER, "StravaStreams")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+os.makedirs(STRAVA_STREAMS_DIR, exist_ok=True)
+
 TOKEN_FILE = os.path.join(FOLDER, "strava_tokens.json")
-ACT_CACHE = os.path.join(FOLDER, "strava_activities.json")
-STREAM_CACHE = os.path.join(FOLDER, "strava_streams.json")
+ACT_CACHE = os.path.join(STRAVA_STREAMS_DIR, "strava_activities.json")
+STREAM_CACHE = os.path.join(STRAVA_STREAMS_DIR, "strava_streams.json")
 
 
 # --- Strava data ------------------------------------------------------------
@@ -236,8 +242,8 @@ def make_route_shirt(course: pd.DataFrame, records: dict) -> None:
     fig.text(0.5, 0.118, "+1477 M D+        28 . 06 . 2026",
              color=SHIRT_INK, fontsize=12.5, ha="center", alpha=0.85)
 
-    fig.savefig(os.path.join(FOLDER, "shirt_route.svg"), facecolor=SHIRT_PAPER)
-    fig.savefig(os.path.join(FOLDER, "shirt_route.png"), dpi=200,
+    fig.savefig(os.path.join(IMAGES_DIR, "shirt_route.svg"), facecolor=SHIRT_PAPER)
+    fig.savefig(os.path.join(IMAGES_DIR, "shirt_route.png"), dpi=200,
                 facecolor=SHIRT_PAPER)
     plt.close(fig)
 
@@ -285,8 +291,8 @@ def make_badge_shirt(course: pd.DataFrame) -> None:
     fig.text(0.5, 0.135, "28 . 06 . 2026", color=SHIRT_INK, fontsize=22,
              fontweight="bold", ha="center")
 
-    fig.savefig(os.path.join(FOLDER, "shirt_badge.svg"), facecolor=SHIRT_PAPER)
-    fig.savefig(os.path.join(FOLDER, "shirt_badge.png"), dpi=200,
+    fig.savefig(os.path.join(IMAGES_DIR, "shirt_badge.svg"), facecolor=SHIRT_PAPER)
+    fig.savefig(os.path.join(IMAGES_DIR, "shirt_badge.png"), dpi=200,
                 facecolor=SHIRT_PAPER)
     plt.close(fig)
 
@@ -348,8 +354,8 @@ def make_stats_shirt(act: pd.DataFrame) -> None:
     fig.text(0.5, 0.150, f"{n} SESSIONS   →   28 . 06 . 2026",
              color=SHIRT_INK, fontsize=16, fontweight="bold", ha="center")
 
-    fig.savefig(os.path.join(FOLDER, "shirt_stats.svg"), facecolor=SHIRT_PAPER)
-    fig.savefig(os.path.join(FOLDER, "shirt_stats.png"), dpi=200,
+    fig.savefig(os.path.join(IMAGES_DIR, "shirt_stats.svg"), facecolor=SHIRT_PAPER)
+    fig.savefig(os.path.join(IMAGES_DIR, "shirt_stats.png"), dpi=200,
                 facecolor=SHIRT_PAPER)
     plt.close(fig)
 
@@ -411,7 +417,7 @@ def make_sunburst(strava: pd.DataFrame, inner_hole: float = 0.0,
     for txt in leg.get_texts():
         txt.set_color("#f2ede1")
 
-    fig.savefig(os.path.join(FOLDER, f"{filename}.png"), dpi=170,
+    fig.savefig(os.path.join(IMAGES_DIR, f"{filename}.png"), dpi=170,
                 facecolor="#16161c", bbox_inches="tight")
     plt.close(fig)
 

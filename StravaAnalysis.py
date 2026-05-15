@@ -42,6 +42,11 @@ def _():
 def _(Decoder, Stream, glob, os, pd):
     # Decode every .fit file in the folder into raw FIT message dicts.
     FIT_FOLDER = "/Users/lois/Documents/Jupyter/Strava"
+    FIT_FILES_DIR = os.path.join(FIT_FOLDER, "FIT files")
+    IMAGES_DIR = os.path.join(FIT_FOLDER, "Images")
+    STRAVA_STREAMS_DIR = os.path.join(FIT_FOLDER, "StravaStreams")
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    os.makedirs(STRAVA_STREAMS_DIR, exist_ok=True)
     RACE_DATE = pd.Timestamp("2026-06-28", tz="UTC")
 
     def load_fit(path: str) -> dict:
@@ -50,10 +55,10 @@ def _(Decoder, Stream, glob, os, pd):
             print(f"{os.path.basename(path)}: {len(errors)} decode error(s)")
         return messages
 
-    fit_files = sorted(glob.glob(os.path.join(FIT_FOLDER, "*.fit")))
+    fit_files = sorted(glob.glob(os.path.join(FIT_FILES_DIR, "*.fit")))
     raw = {os.path.basename(p): load_fit(p) for p in fit_files}
-    # (was: print("Loaded ... .fit files: ..."); silenced for clean intro)
-    return FIT_FOLDER, RACE_DATE, raw
+    # (silenced "Loaded N FIT files" prints for a clean intro)
+    return FIT_FOLDER, RACE_DATE, STRAVA_STREAMS_DIR, raw
 
 
 @app.cell(hide_code=True)
@@ -546,13 +551,13 @@ def _(mo):
 
 
 @app.cell
-def _(FIT_FOLDER, json, os, pd, requests, time):
+def _(FIT_FOLDER, STRAVA_STREAMS_DIR, json, os, pd, requests, time):
     # Tokens live in strava_tokens.json (credentials — keep private). Activity
     # summaries are cached to strava_activities.json so we don\'t hit the API every
     # run; set STRAVA_REFRESH = True to re-pull.
     STRAVA_REFRESH = False
     _TOKEN_FILE = os.path.join(FIT_FOLDER, "strava_tokens.json")
-    _CACHE_FILE = os.path.join(FIT_FOLDER, "strava_activities.json")
+    _CACHE_FILE = os.path.join(STRAVA_STREAMS_DIR, "strava_activities.json")
 
     def strava_access_token() -> str:
         """Return a valid access token, refreshing + re-saving if it has expired."""
@@ -691,19 +696,19 @@ def _(mo, records):
 
         Per-activity streams are pulled
         from Strava — heart rate, GPS, speed, altitude at 1 Hz — giving the same
-        depth as the sample `.fit` files but across all {n} activities.
+        depth as the sample `.fit` files I initally downloaded but across all {n} activities.
         """.replace("{n}", str(len(records)))
     )
     return
 
 
 @app.cell
-def _(FIT_FOLDER, json, os, pd, requests, strava, strava_access_token):
+def _(STRAVA_STREAMS_DIR, json, os, pd, requests, strava, strava_access_token):
     # Per-activity streams since DEEP_START, cached to strava_streams.json
     # (one API call per activity — set STREAMS_REFRESH=True to re-pull).
     DEEP_START = pd.Timestamp("2026-03-01")
     STREAMS_REFRESH = False
-    _STREAMS_FILE = os.path.join(FIT_FOLDER, "strava_streams.json")
+    _STREAMS_FILE = os.path.join(STRAVA_STREAMS_DIR, "strava_streams.json")
     _STREAM_KEYS = ("time,distance,altitude,latlng,heartrate,"
                     "velocity_smooth,cadence,grade_smooth")
 
