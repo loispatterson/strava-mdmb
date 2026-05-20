@@ -147,6 +147,44 @@ def build_records(streams_raw: dict) -> dict:
     return records
 
 
+def load_streams_2025(strava: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """GPS latlng streams for 2025 runs & hikes (year-in-routes grid).
+
+    Cached to StravaStreams/strava_streams_2025.json. Format is flatter than
+    the since-March cache: ``{activity_id: [[lat, lon], ...]}``.
+
+    Returns (routes_df, streams_dict). routes_df only contains activities
+    we actually have a track for, sorted by date.
+    """
+    cache = os.path.join(STRAVA_STREAMS_DIR, "strava_streams_2025.json")
+    y25 = (strava[(strava["start_local"].dt.year == 2025)
+                  & (strava["type"].isin(["Run", "TrailRun", "Hike"]))]
+           .copy())
+    if os.path.exists(cache):
+        with open(cache) as fh:
+            raw = json.load(fh)
+    else:
+        headers = {"Authorization": f"Bearer {strava_access_token()}"}
+        raw = {}
+        for aid in y25["id"]:
+            resp = requests.get(
+                f"https://www.strava.com/api/v3/activities/{aid}/streams",
+                headers=headers,
+                params={"keys": "latlng", "key_by_type": "true"},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                latlng = resp.json().get("latlng", {}).get("data")
+                if latlng:
+                    raw[str(aid)] = latlng
+        with open(cache, "w") as fh:
+            json.dump(raw, fh)
+
+    routes = (y25[y25["id"].astype(str).isin(raw)]
+              .sort_values("start_local").reset_index(drop=True))
+    return routes, raw
+
+
 def build_act(strava: pd.DataFrame) -> pd.DataFrame:
     """Per-activity table for the training window (since DEEP_START)."""
     deep = strava[strava["start_local"] >= DEEP_START].copy()
@@ -422,6 +460,47 @@ def make_sunburst(strava: pd.DataFrame, inner_hole: float = 0.0,
     plt.close(fig)
 
 
+# --- annual routes grid -----------------------------------------------------
+def make_routes_grid_2025(routes: pd.DataFrame, streams: dict) -> None:
+    """Every 2025 run & hike rendered as its own little route shape, in a
+    chronological grid coloured Jan → Dec. Saved to Images/routes_2025.png."""
+    n = len(routes)
+    ncol = 10
+    nrow = int(np.ceil(n / ncol))
+
+    fig, axes = plt.subplots(nrow, ncol, figsize=(ncol * 1.45, nrow * 1.55))
+    fig.patch.set_facecolor("#16161c")
+    axes = np.array(axes).flatten()
+
+    for i, r in enumerate(routes.itertuples()):
+        ax = axes[i]
+        ax.set_facecolor("#16161c")
+        ax.axis("off")
+        ll = np.array(streams[str(r.id)])
+        lat, lon = ll[:, 0], ll[:, 1]
+        x = lon * np.cos(np.radians(lat.mean()))
+        color = plt.cm.turbo(r.start_local.dayofyear / 366)
+        ax.plot(x, lat, color=color, lw=1.2, solid_capstyle="round")
+        ax.set_aspect("equal")
+        ax.set_title(f"{r.start_local:%-d %b} · {r.dist_km:.0f}k",
+                     color="#f2ede1", fontsize=6.5, pad=2)
+
+    for j in range(n, len(axes)):
+        axes[j].axis("off")
+        axes[j].set_facecolor("#16161c")
+
+    fig.suptitle(f"2025  ·  {n} RUNS & HIKES", color="#f2ede1",
+                 fontsize=22, fontweight="bold", y=0.985)
+    fig.text(0.5, 0.945,
+             "each shape is one activity   ·   colour runs January → December",
+             color="#f2ede1", fontsize=10, ha="center", alpha=0.65)
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.90, bottom=0.01,
+                        wspace=0.15, hspace=0.55)
+    fig.savefig(os.path.join(IMAGES_DIR, "routes_2025.png"), dpi=170,
+                facecolor="#16161c")
+    plt.close(fig)
+
+
 # --- run --------------------------------------------------------------------
 def main() -> None:
     print("Loading Strava activities...")
@@ -444,9 +523,13 @@ def main() -> None:
     make_sunburst(strava, inner_hole=0.0, filename="sunburst_2025")
     make_sunburst(strava, inner_hole=4.0, filename="sunburst_2025_donut")
 
+    print("Drawing 2025 routes grid...")
+    routes_2025, streams_2025 = load_streams_2025(strava)
+    make_routes_grid_2025(routes_2025, streams_2025)
+
     for name in ("shirt_route", "shirt_badge", "shirt_stats"):
         print(f"  {name}.svg / {name}.png")
-    for name in ("sunburst_2025", "sunburst_2025_donut"):
+    for name in ("sunburst_2025", "sunburst_2025_donut", "routes_2025"):
         print(f"  {name}.png")
     print("Done.")
 
