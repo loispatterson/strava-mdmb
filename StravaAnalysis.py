@@ -1195,71 +1195,306 @@ def _(
     return
 
 
-@app.cell
-def _(RACE_DATE, mo, pd):
-    # Week-by-week plan to race day. Built around the findings above:
-    # fix the easy/hard balance, peak the long mountain day, practise descents
-    # and tired climbing, then taper. Dates count back from the race.
-    _race = RACE_DATE.tz_localize(None).normalize()
-    _weeks = []
-    for _i in range(6, 0, -1):
-        _wk_start = _race - pd.Timedelta(weeks=_i) + pd.Timedelta(days=1)
-        _weeks.append(_wk_start)
+@app.cell(hide_code=True)
+def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
+    # Last 7 days — focused weekly debrief. Rolling 7×24h window ending now.
+    # Filters to race-relevant activities (Run / TrailRun / Hike / Walk).
+    # Z3 (123–141 bpm) split at its midpoint; zone mix compared vs the prior week.
+    _now = pd.Timestamp.now()
+    _w1_end,  _w1_start = _now, _now - pd.Timedelta(days=7)
+    _w0_end,  _w0_start = _w1_start, _w1_start - pd.Timedelta(days=7)
 
-    plan_rows = [
-        dict(phase="Build", long_day="16\u201318 km / 1000 m, easy",
-             quality="Hill repeats: 6\u20138 \u00d7 2 min uphill hard",
-             focus="I reset my intensity \u2014 4 of 5 runs fully conversational (Z2)."),
-        dict(phase="Build", long_day="20 km / 1200 m on race-type terrain",
-             quality="Sustained climb 20\u201325 min at threshold",
-             focus="I add downhill running on the long day \u2014 controlled, not braking."),
-        dict(phase="Peak", long_day="24 km / 1400 m \u2014 race simulation",
-             quality="Climb intervals when already tired (end of a medium run)",
-             focus="My biggest week. I practise race fuelling on the long day."),
-        dict(phase="Peak", long_day="22 km / 1300 m, relaxed",
-             quality="Short hill repeats, stay sharp",
-             focus="My last big week \u2014 then volume starts coming down."),
-        dict(phase="Taper", long_day="14 km / 700 m, easy",
-             quality="2 \u00d7 10 min at race-climb effort",
-             focus="I cut volume ~30 %. Legs should start feeling springy."),
-        dict(phase="Taper", long_day="Race \u2014 23 km du Mont-Blanc \U0001f3d4\ufe0f",
-             quality="Mon/Tue: 20\u201330 min easy + 3 short strides",
-             focus="Volume ~50 % down. I stay off my legs, eat well, arrive fresh."),
+    def _window(df, start, end):
+        return df[(df["date"] >= start) & (df["date"] < end)
+                  & (df["type"].isin(RACE_RELEVANT))].copy()
+
+    _last7  = _window(act, _w1_start, _w1_end)
+    _prior7 = _window(act, _w0_start, _w0_end)
+
+    def _agg(df):
+        return dict(n=len(df),
+                    km=float(df["dist_km"].sum()),
+                    ascent=float(df["ascent_dem_m"].sum()),
+                    hours=float(df["moving_min"].sum() / 60))
+
+    _cur, _prv = _agg(_last7), _agg(_prior7)
+
+    def _delta(a, b, unit="", prec=1):
+        if b == 0:
+            return f"({a:.{prec}f}{unit} vs 0 prior)"
+        pct = (a / b - 1) * 100
+        arrow = "↑" if pct >= 0 else "↓"
+        return f"{arrow} {abs(pct):.0f}%  (prior: {b:.{prec}f}{unit})"
+
+    _summary = mo.md(f"""
+    ## Last 7 days · {_w1_start:%a %d %b} – {_w1_end:%a %d %b %Y}
+
+    | Metric | This week | vs prior 7 days |
+    |---|---|---|
+    | Sessions | **{_cur['n']}** | {_delta(_cur['n'], _prv['n'], '', 0)} |
+    | Distance | **{_cur['km']:.1f} km** | {_delta(_cur['km'], _prv['km'], ' km')} |
+    | Ascent | **{_cur['ascent']:,.0f} m** | {_delta(_cur['ascent'], _prv['ascent'], ' m', 0)} |
+    | Moving time | **{_cur['hours']:.1f} h** | {_delta(_cur['hours'], _prv['hours'], ' h')} |
+    """)
+
+    _detail = (
+        _last7.sort_values("date")
+        .assign(day=lambda d: d["date"].dt.strftime("%a %d %b"))
+        [["day", "name", "type", "dist_km", "ascent_dem_m",
+          "moving_min", "avg_hr", "easy_pct"]]
+        .rename(columns={"dist_km": "km", "ascent_dem_m": "ascent_m",
+                         "moving_min": "min", "easy_pct": "easy_%"})
+        .round({"km": 1, "ascent_m": 0, "min": 0, "avg_hr": 0, "easy_%": 0})
+    )
+
+    # HR-zone breakdown with Z3 split into low / high halves at its midpoint
+    _z3_lo, _z3_hi = GARMIN_HR_BOUNDS[2], GARMIN_HR_BOUNDS[3]   # 123, 141
+    _z3_mid = (_z3_lo + _z3_hi) / 2                               # 132
+    _split_zones = [
+        ("Z1 recovery",    0,                    GARMIN_HR_BOUNDS[1], "#3b82f6"),
+        ("Z2 endurance",   GARMIN_HR_BOUNDS[1],  _z3_lo,              "#22c55e"),
+        ("Z3a low tempo",  _z3_lo,               _z3_mid,             "#facc15"),
+        ("Z3b high tempo", _z3_mid,              _z3_hi,              "#eab308"),
+        ("Z4 threshold",   _z3_hi,               GARMIN_HR_BOUNDS[4], "#f97316"),
+        ("Z5 VO2max",      GARMIN_HR_BOUNDS[4],  999,                 "#ef4444"),
     ]
-    training_plan = pd.DataFrame(plan_rows)
-    training_plan.insert(0, "week_of", [w.strftime("%d %b") for w in _weeks])
-    training_plan.insert(0, "week", [f"W{i}" for i in range(1, 7)])
+    _split_order  = [z[0] for z in _split_zones]
+    _split_colors = [z[3] for z in _split_zones]
+
+    def _zmin(df):
+        """Total minutes per (split) zone across a window's activities."""
+        out = {n: 0.0 for n, _, _, _ in _split_zones}
+        for _row in df.itertuples():
+            _rec = records[str(_row.id)][["timestamp", "heart_rate"]].dropna()
+            _dt = _rec["timestamp"].diff().dt.total_seconds().clip(upper=10).fillna(1.0)
+            for _n, _lo, _hi, _c in _split_zones:
+                out[_n] += float(_dt[(_rec["heart_rate"] >= _lo)
+                                     & (_rec["heart_rate"] < _hi)].sum() / 60)
+        return out
+
+    def _pcts(m):
+        _t = sum(m.values())
+        return ({k: 100 * v / _t for k, v in m.items()} if _t else
+                {k: 0.0 for k in m}), _t
+
+    _m1, _t1 = _pcts(_zmin(_last7))
+    _m0, _t0 = _pcts(_zmin(_prior7))
+
+    _zt = pd.DataFrame({"zone": _split_order})
+    _zt["minutes"] = _zt["zone"].map(_zmin(_last7))
+    _zt["pct"]     = _zt["zone"].map(_m1)
+    _zt["pp"]      = _zt["zone"].map(lambda z: _m1[z] - _m0[z])   # pts vs last wk
+    _zt["pct_lbl"] = _zt.apply(
+        lambda r: f"{r['pct']:.0f}%  ({r['pp']:+.0f}pp)", axis=1)
+
+    _bars = alt.Chart(_zt).mark_bar().encode(
+        y=alt.Y("zone:N", sort=_split_order, title=None),
+        x=alt.X("minutes:Q", title="Minutes", scale=alt.Scale(padding=60)),
+        color=alt.Color("zone:N", sort=_split_order, legend=None,
+                        scale=alt.Scale(domain=_split_order, range=_split_colors)),
+        tooltip=["zone",
+                 alt.Tooltip("minutes:Q", format=".0f"),
+                 alt.Tooltip("pct:Q", format=".1f", title="% this week"),
+                 alt.Tooltip("pp:Q", format="+.1f", title="pp vs last week")],
+    )
+    _labels = alt.Chart(_zt).mark_text(align="left", baseline="middle",
+                                       dx=4, fontWeight="bold").encode(
+        y=alt.Y("zone:N", sort=_split_order),
+        x="minutes:Q",
+        text="pct_lbl:N",
+    )
+    _zone_chart = (_bars + _labels).properties(
+        height=210, width=520,
+        title=f"HR-zone minutes, last 7 days  (Z3 split at {_z3_mid:.0f} bpm · pp = pts vs last week)",
+    )
+
+    _easy1 = _m1["Z1 recovery"] + _m1["Z2 endurance"]
+    _easy0 = _m0["Z1 recovery"] + _m0["Z2 endurance"]
+    _hard1 = _m1["Z4 threshold"] + _m1["Z5 VO2max"]
+
+    _mix = mo.md(f"""
+    **Aerobic mix (vs last week):**
+
+    - **{_easy1:.0f}% easy** — Z1–Z2 ({_easy1 - _easy0:+.0f}pp) · of which **Z2 endurance {_m1['Z2 endurance']:.0f}%** ({_m1['Z2 endurance'] - _m0['Z2 endurance']:+.0f}pp)
+    - **{_m1['Z3a low tempo'] + _m1['Z3b high tempo']:.0f}% tempo** — Z3: **{_m1['Z3a low tempo']:.0f}% low** ({_z3_lo}–{_z3_mid:.0f}) + **{_m1['Z3b high tempo']:.0f}% high** ({_z3_mid:.0f}–{_z3_hi})
+    - **{_hard1:.0f}% hard** — Z4–Z5 ({_hard1 - (_m0['Z4 threshold'] + _m0['Z5 VO2max']):+.0f}pp)
+
+    Mountain-ultra base target ≈ 80% easy. Z2 is the engine — more of it is the goal.
+    """)
+
+    mo.vstack([_summary, _detail, _zone_chart, _mix])
+
+    return
+
+
+@app.cell(hide_code=True)
+def _(act, alt, mo, np, pd):
+    # Fitness trend — aerobic efficiency (EF = speed / HR). EF is terrain- and
+    # intensity-sensitive, so the trend is fit ONLY on comparable *steady road
+    # runs* (flat < 20 m/km, run at a real aerobic effort, avg HR ≥ 148). Easy,
+    # interval and hilly runs are plotted faded for context — their low EF is
+    # expected, not a fitness drop.
+    _runs = act[act["type"] == "Run"].dropna(subset=["ef"]).copy()
+    _runs["steady"] = (_runs["vert_per_km"] < 20) & (_runs["avg_hr"] >= 148)
+    _runs["kind"] = np.where(_runs["steady"], "steady road run",
+                             "easy / interval / hilly")
+
+    _steady = _runs[_runs["steady"]].sort_values("date")
+    _d0 = _steady["date"].min()
+    _xday = (_steady["date"] - _d0).dt.total_seconds() / 86400
+    _coef = np.polyfit(_xday, _steady["ef"], 1)
+    _pct_wk = (_coef[0] * 7) / _steady["ef"].mean() * 100
+    _trend = pd.DataFrame({
+        "date": [_steady["date"].min(), _steady["date"].max()],
+        "ef":   [np.polyval(_coef, _xday.min()), np.polyval(_coef, _xday.max())],
+    })
+    _best = _steady.loc[_steady["ef"].idxmax()]
+    _six_ago = pd.Timestamp.now() - pd.Timedelta(weeks=6)
+
+    _pts = alt.Chart(_runs).mark_point(filled=True, opacity=0.85).encode(
+        x=alt.X("date:T", title=None),
+        y=alt.Y("ef:Q", title="Efficiency factor (speed / HR)",
+                scale=alt.Scale(zero=False)),
+        size=alt.Size("vert_per_km:Q", title="Climb (m/km)",
+                      scale=alt.Scale(range=[40, 450])),
+        color=alt.Color("kind:N", title=None,
+                        scale=alt.Scale(
+                            domain=["steady road run", "easy / interval / hilly"],
+                            range=["#2563eb", "#cbd5e1"])),
+        tooltip=["name", "date:T", alt.Tooltip("ef:Q", format=".5f"),
+                 alt.Tooltip("avg_hr:Q", title="avg HR"),
+                 alt.Tooltip("vert_per_km:Q", format=".0f", title="m/km"),
+                 alt.Tooltip("pace_min_km:Q", format=".2f", title="pace")],
+    )
+    _trend_line = alt.Chart(_trend).mark_line(
+        color="#2563eb", strokeDash=[6, 4], size=2.5).encode(x="date:T", y="ef:Q")
+    _six_rule = alt.Chart(pd.DataFrame({"date": [_six_ago]})).mark_rule(
+        color="#94a3b8", strokeDash=[2, 2]).encode(x="date:T")
+
+    _ef_chart = (_pts + _trend_line + _six_rule).properties(
+        height=260, width=580,
+        title="Fitness trend — EF on comparable steady runs  (dashed grey = 6 weeks ago)",
+    )
+
+    _dir = ("improving" if _pct_wk > 0.1
+            else "declining" if _pct_wk < -0.1 else "holding steady")
+    _caption = mo.md(f"""
+    **Am I getting fitter?** On comparable **steady road runs** (flat, HR ≥ 148)
+    my speed-per-heartbeat is **{_dir}** — fitted slope **{_pct_wk:+.1f}% / week**
+    across the base period. Best steady EF so far: **{_best['ef']:.4f}** on
+    {_best['date']:%d %b}.
+
+    The faded points are easy / interval / hilly runs — low EF there is *by design*
+    (easy pace, or climbing), not lost fitness. Aerobic gains from this month's Z2
+    block take **2–6 weeks** to show up as EF, so the payoff of the easy work lands
+    in June. Watch the blue line.
+    """)
+
+    mo.vstack([_ef_chart, _caption])
+
+    return
+
+
+@app.cell
+def _(RACE_DATE, ZONE_ORDER, mo, pd, zone_long):
+    # Week-by-week plan to race day, regenerated from today's date. Built around
+    # the findings above: lock in the easy/Z2 balance, peak the long mountain day,
+    # practise descents + tired climbing, then taper. Phases are keyed to
+    # weeks-to-race, so re-running later still lays out the correct remaining plan.
+    _race = RACE_DATE.tz_localize(None).normalize()
+    _today = pd.Timestamp.now().normalize()
+    _mon0 = _today - pd.Timedelta(days=_today.weekday())   # Monday of this week
+    _starts = []
+    _m = _mon0
+    while _m <= _race:
+        _starts.append(_m)
+        _m = _m + pd.Timedelta(weeks=1)
+
+    # Live easy/Z2 share for the current 7 days (original 5-zone scheme)
+    _zc = zone_long[zone_long["date"] >= pd.Timestamp.now() - pd.Timedelta(days=7)]
+    _zsum = _zc.groupby("zone")["minutes"].sum().reindex(ZONE_ORDER)
+    _zt = _zsum.sum()
+    _easy_now = 100 * _zsum[["Z1 recovery", "Z2 endurance"]].sum() / _zt if _zt else 0
+    _z2_now   = 100 * _zsum["Z2 endurance"] / _zt if _zt else 0
+
+    # Content keyed by weeks-to-race (0 = race week)
+    _tmpl = {
+        0: dict(phase="Race",  easy="race",  long_day="Race — 23 km du Mont-Blanc 🏔️",
+                quality="Mon/Tue: 20–30 min easy + 3 short strides",
+                focus="Volume ~50% down. Stay off the legs, fuel well, arrive fresh."),
+        1: dict(phase="Taper", easy="~80%", long_day="16–18 km / 900 m, relaxed",
+                quality="2 × 10 min at race-climb effort",
+                focus="Cut volume ~25%. Legs start to feel springy — keep every easy run in Z2."),
+        2: dict(phase="Peak",  easy="~75%", long_day="24 km / 1400 m — race simulation",
+                quality="Climb intervals when already tired (end of a medium run)",
+                focus="Biggest week. Rehearse race fuelling + kit. Easy runs strictly Z2."),
+        3: dict(phase="Build", easy="~70%", long_day="20 km / 1200 m on race-type terrain",
+                quality="Sustained climb 20–25 min at threshold",
+                focus="Add controlled downhill running on the long day. Easy days stay conversational."),
+        4: dict(phase="Build", easy="≥ 65%", long_day="18–20 km / ~1100 m, easy",
+                quality="Hill repeats 6–8 × 2 min uphill hard",
+                focus="Hold the Z2 reset — only the hill session is hard; everything else is Z2."),
+    }
+    _default = dict(phase="Build", easy="≥ 65%", long_day="16–20 km / ~1000 m, easy",
+                    quality="Hill repeats 6–8 × 2 min uphill hard",
+                    focus="Build aerobic volume; keep ~80% of running time easy (Z2).")
+
+    _rows = []
+    _n = len(_starts)
+    for _i, _ws in enumerate(_starts):
+        _out = _n - 1 - _i                       # weeks to race
+        _c = _tmpl.get(_out, _default)
+        _is_now = _ws <= _today <= _ws + pd.Timedelta(days=6)
+        _wk_lbl = "Race wk" if _out == 0 else f"{_out} wk{'s' if _out != 1 else ''} out"
+        if _is_now:
+            _wk_lbl += " ← now"
+        _rows.append(dict(week=_wk_lbl, week_of=_ws.strftime("%d %b"),
+                          phase=_c["phase"], easy_target=_c["easy"],
+                          long_day=_c["long_day"], quality=_c["quality"],
+                          focus=_c["focus"]))
+    training_plan = pd.DataFrame(_rows)
+
+    _wks_to_race = (_race - _today).days / 7
 
     mo.vstack([
         mo.md(
-            """
+            f"""
             ---
-            ## My 6-week plan \u2192 28 June
+            ## My plan → 28 June  ({_wks_to_race:.0f} weeks out)
 
-            My shape per week: **2 easy runs \u00b7 1 long mountain day \u00b7
-            1 quality session \u00b7 1\u20132 rest / cross-train days.** The
-            non-negotiable rule \u2014 *my easy days are actually easy* (Z2,
-            conversational pace). That's what turns my existing volume into race
-            fitness.
+            **The Z2 reset is working.** This week I'm at **{_easy_now:.0f}% easy**
+            with **Z2 endurance at {_z2_now:.0f}%** of my training time — up
+            sharply, and exactly the engine a 2.5–4 h mountain race runs on.
+            Steady-run efficiency is holding with a slight upward tilt; the real
+            aerobic payoff of this block lands over the next few weeks.
+
+            My weekly shape: **2 easy/Z2 runs · 1 long mountain day ·
+            1 quality session · 1–2 rest / cross-train days.** The one
+            non-negotiable rule, all the way through the taper: ***easy days are
+            actually easy (Z2, conversational).*** Each week's **easy target**
+            ramps toward ~80% — that is what turns my volume into race fitness.
             """
         ),
         training_plan,
         mo.md(
-            f"""
-            **Threaded through every week:**
+            """
+            **Threaded through every week (incl. the taper):**
 
-            - **Descents** \u2014 the race drops ~250 m fast mid-course and finishes
-              on tired quads. I'll *run* downhills on the long days, not just hike them.
-            - **Tired climbing** \u2014 the last 7 km is all up. I'll put climb
-              efforts at the *end* of sessions, not the start.
-            - **Fuel & feet** \u2014 I'll rehearse eating on the move and my race
-              shoes / kit on the peak long days, not on race day.
-            - **Recheck** \u2014 I'll re-run this notebook weekly
-              (`STRAVA_REFRESH = True`, `STREAMS_REFRESH = True`) to watch the
-              easy-% and efficiency trend move.
+            - **Z2 discipline** — only the one flagged quality session goes hard.
+              If a run drifts above Z2 on the flat, I ease off. This holds *through*
+              the taper, not just the build.
+            - **Descents** — the race drops ~250 m fast mid-course and finishes
+              on tired quads. I *run* downhills on the long days, not just hike them.
+            - **Tired climbing** — the last 7 km is all up. Climb efforts go at
+              the *end* of sessions, not the start.
+            - **Fuel & feet** — rehearse eating on the move + race shoes / kit on
+              the peak long day, never on race day.
+            - **Recheck** — re-run this notebook weekly to watch easy-%, Z2 share
+              and the EF trend move.
             """
         ),
     ])
+
     return
 
 
