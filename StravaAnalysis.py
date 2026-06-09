@@ -554,8 +554,8 @@ def _(mo):
 def _(FIT_FOLDER, STRAVA_STREAMS_DIR, json, os, pd, requests, time):
     # Tokens live in strava_tokens.json (credentials — keep private). Activity
     # summaries are cached to strava_activities.json so we don\'t hit the API every
-    # run; set STRAVA_REFRESH = True to re-pull.
-    STRAVA_REFRESH = False
+    # run; set STRAVA_REFRESH = False to re-pull.
+    STRAVA_REFRESH = True
     _TOKEN_FILE = os.path.join(FIT_FOLDER, "strava_tokens.json")
     _CACHE_FILE = os.path.join(STRAVA_STREAMS_DIR, "strava_activities.json")
 
@@ -704,8 +704,9 @@ def _(mo, records):
 
 @app.cell
 def _(STRAVA_STREAMS_DIR, json, os, pd, requests, strava, strava_access_token):
-    # Per-activity streams since DEEP_START, cached to strava_streams.json
-    # (one API call per activity — set STREAMS_REFRESH=True to re-pull).
+    # Per-activity streams since DEEP_START, cached to strava_streams.json.
+    # Incremental: loads the cache and only fetches streams for activities not
+    # already cached (set STREAMS_REFRESH=True to re-pull every activity).
     DEEP_START = pd.Timestamp("2026-03-01")
     STREAMS_REFRESH = False
     _STREAMS_FILE = os.path.join(STRAVA_STREAMS_DIR, "strava_streams.json")
@@ -725,18 +726,25 @@ def _(STRAVA_STREAMS_DIR, json, os, pd, requests, strava, strava_access_token):
         resp.raise_for_status()
         return {k: v["data"] for k, v in resp.json().items()}
 
-    if STREAMS_REFRESH or not os.path.exists(_STREAMS_FILE):
+    # Start from the existing cache (unless a full refresh is requested), then
+    # top up any since-March activity whose streams we don't have yet.
+    if not STREAMS_REFRESH and os.path.exists(_STREAMS_FILE):
+        with open(_STREAMS_FILE) as _fh:
+            _streams_raw = json.load(_fh)
+    else:
         _streams_raw = {}
-        for _aid in deep_acts["id"]:
+
+    _missing = [int(a) for a in deep_acts["id"] if str(a) not in _streams_raw]
+    if _missing:
+        print(f"fetching streams for {len(_missing)} new activit"
+              f"{'y' if len(_missing) == 1 else 'ies'}...")
+        for _aid in _missing:
             try:
                 _streams_raw[str(_aid)] = _fetch_streams(int(_aid))
             except Exception as exc:  # skip activities with no stream data
                 print(f"  skipped {_aid}: {exc}")
         with open(_STREAMS_FILE, "w") as _fh:
             json.dump(_streams_raw, _fh)
-    else:
-        with open(_STREAMS_FILE) as _fh:
-            _streams_raw = json.load(_fh)
 
     def _streams_to_records(aid: str, start_utc: pd.Timestamp) -> pd.DataFrame:
         """Strava streams -> a record DataFrame with .fit-compatible columns."""
@@ -1149,7 +1157,7 @@ def _(
         The data above tells a fairly clean story:
 
         - **My base is back.** 2026 Jan–May is **{_dist_vs_ly:+.0f}%** on the
-          same months in 2025 — the anaemic patch is well behind me.
+          same months in 2025 — a strong aerobic base is rebuilt.
         - **I'm getting fitter, modestly.** On flat runs my pace-at-fixed-HR is
           roughly stable, but my most recent run is the best of the set — speed
           is just starting to follow the base.
@@ -1197,12 +1205,15 @@ def _(
 
 @app.cell(hide_code=True)
 def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
-    # Last 7 days — focused weekly debrief. Rolling 7×24h window ending now.
+    # Weekly debrief — the last COMPLETE Monday–Sunday week vs the week before.
     # Filters to race-relevant activities (Run / TrailRun / Hike / Walk).
     # Z3 (123–141 bpm) split at its midpoint; zone mix compared vs the prior week.
     _now = pd.Timestamp.now()
-    _w1_end,  _w1_start = _now, _now - pd.Timedelta(days=7)
-    _w0_end,  _w0_start = _w1_start, _w1_start - pd.Timedelta(days=7)
+    # Monday 00:00 of the current week; the last complete week ends there (exclusive).
+    _this_mon = _now.normalize() - pd.Timedelta(days=_now.weekday())
+    _w1_end,  _w1_start = _this_mon,             _this_mon - pd.Timedelta(days=7)
+    _w0_end,  _w0_start = _w1_start,             _w1_start - pd.Timedelta(days=7)
+    _w1_last = _w1_end - pd.Timedelta(days=1)    # inclusive Sunday, for display
 
     def _window(df, start, end):
         return df[(df["date"] >= start) & (df["date"] < end)
@@ -1227,9 +1238,9 @@ def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
         return f"{arrow} {abs(pct):.0f}%  (prior: {b:.{prec}f}{unit})"
 
     _summary = mo.md(f"""
-    ## Last 7 days · {_w1_start:%a %d %b} – {_w1_end:%a %d %b %Y}
+    ## Week of {_w1_start:%a %d %b} – {_w1_last:%a %d %b %Y}
 
-    | Metric | This week | vs prior 7 days |
+    | Metric | This week | vs prior week |
     |---|---|---|
     | Sessions | **{_cur['n']}** | {_delta(_cur['n'], _prv['n'], '', 0)} |
     | Distance | **{_cur['km']:.1f} km** | {_delta(_cur['km'], _prv['km'], ' km')} |
@@ -1283,7 +1294,7 @@ def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
     _zt = pd.DataFrame({"zone": _split_order})
     _zt["minutes"] = _zt["zone"].map(_zmin(_last7))
     _zt["pct"]     = _zt["zone"].map(_m1)
-    _zt["pp"]      = _zt["zone"].map(lambda z: _m1[z] - _m0[z])   # pts vs last wk
+    _zt["pp"]      = _zt["zone"].map(lambda z: _m1[z] - _m0[z])   # pts vs prior wk
     _zt["pct_lbl"] = _zt.apply(
         lambda r: f"{r['pct']:.0f}%  ({r['pp']:+.0f}pp)", axis=1)
 
@@ -1295,7 +1306,7 @@ def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
         tooltip=["zone",
                  alt.Tooltip("minutes:Q", format=".0f"),
                  alt.Tooltip("pct:Q", format=".1f", title="% this week"),
-                 alt.Tooltip("pp:Q", format="+.1f", title="pp vs last week")],
+                 alt.Tooltip("pp:Q", format="+.1f", title="pp vs prior week")],
     )
     _labels = alt.Chart(_zt).mark_text(align="left", baseline="middle",
                                        dx=4, fontWeight="bold").encode(
@@ -1305,7 +1316,7 @@ def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
     )
     _zone_chart = (_bars + _labels).properties(
         height=210, width=520,
-        title=f"HR-zone minutes, last 7 days  (Z3 split at {_z3_mid:.0f} bpm · pp = pts vs last week)",
+        title=f"HR-zone minutes, week of {_w1_start:%d %b}  (Z3 split at {_z3_mid:.0f} bpm · pp = pts vs prior week)",
     )
 
     _easy1 = _m1["Z1 recovery"] + _m1["Z2 endurance"]
@@ -1313,7 +1324,7 @@ def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
     _hard1 = _m1["Z4 threshold"] + _m1["Z5 VO2max"]
 
     _mix = mo.md(f"""
-    **Aerobic mix (vs last week):**
+    **Aerobic mix (vs prior week):**
 
     - **{_easy1:.0f}% easy** — Z1–Z2 ({_easy1 - _easy0:+.0f}pp) · of which **Z2 endurance {_m1['Z2 endurance']:.0f}%** ({_m1['Z2 endurance'] - _m0['Z2 endurance']:+.0f}pp)
     - **{_m1['Z3a low tempo'] + _m1['Z3b high tempo']:.0f}% tempo** — Z3: **{_m1['Z3a low tempo']:.0f}% low** ({_z3_lo}–{_z3_mid:.0f}) + **{_m1['Z3b high tempo']:.0f}% high** ({_z3_mid:.0f}–{_z3_hi})
@@ -1323,7 +1334,6 @@ def _(GARMIN_HR_BOUNDS, RACE_RELEVANT, act, alt, mo, pd, records):
     """)
 
     mo.vstack([_summary, _detail, _zone_chart, _mix])
-
     return
 
 
@@ -1487,6 +1497,11 @@ def _(RACE_DATE, ZONE_ORDER, mo, pd, zone_long):
               on tired quads. I *run* downhills on the long days, not just hike them.
             - **Tired climbing** — the last 7 km is all up. Climb efforts go at
               the *end* of sessions, not the start.
+            - **Altitude + even climb pacing** — my Jun-7 breathlessness only hit
+              above ~1750 m, and mostly because I climbed hard low down then met the
+              altitude ceiling. Put key long days **up high (1800–2200 m)** and climb
+              from the bottom at an **even, conversational effort**, lifting only near
+              the top — familiarity and pacing, not heroics.
             - **Fuel & feet** — rehearse eating on the move + race shoes / kit on
               the peak long day, never on race day.
             - **Recheck** — re-run this notebook weekly to watch easy-%, Z2 share
@@ -1495,6 +1510,238 @@ def _(RACE_DATE, ZONE_ORDER, mo, pd, zone_long):
         ),
     ])
 
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Same climb, two days — May 1 vs Jun 7 (breathlessness check)
+
+    Using the **shared Strava segment "Marathon du Mont-Blanc · 2ème montée"** (+19 %,
+    the actual race climb) — a fixed bit of trail that both the **1 May** run and the
+    **7 Jun** session climbed. A true like-for-like, ~290 m of ascent from 1424 → 1715 m.
+
+    Note the context: on **Jun 7** you reached this climb **~65 % into a 16 km outing
+    (already tired)**, whereas on **May 1** you hit it **fresh, near the start** — so any
+    edge on Jun 7 is *despite* being more fatigued.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(pd, records):
+    # Like-for-like on the shared Strava segment (MdMB 2ème montée, +19%). The
+    # index ranges are the Strava segment-effort start/end into each activity's
+    # stream (records[aid] is 1:1 with the stream samples).
+    cmp_J = records["18824580666"].iloc[3609:4360].copy()   # Jun 7 effort
+    cmp_M = records["18330726193"].iloc[250:868].copy()      # May 1 effort
+
+    def _stats(s):
+        _t = (s["timestamp"].iloc[-1] - s["timestamp"].iloc[0]).total_seconds()
+        _d = s["distance"].iloc[-1] - s["distance"].iloc[0]
+        _g = s["enhanced_altitude"].iloc[-1] - s["enhanced_altitude"].iloc[0]
+        return dict(gain=_g, dist=_d, mins=_t / 60, vam=_g / (_t / 3600),
+                    pace=(_t / 60) / (_d / 1000), hr=s["heart_rate"].mean(),
+                    hrmax=s["heart_rate"].max(), eff=(_g / (_t / 3600)) / s["heart_rate"].mean())
+    cmp_j, cmp_m = _stats(cmp_J), _stats(cmp_M)
+
+    cmp_table = pd.DataFrame({
+        "Metric": ["Altitude gain", "Distance", "Time", "Avg HR", "Max HR",
+                   "Vertical speed", "Pace", "Climb efficiency", "Where in the run"],
+        "Jun 7": [f"+{cmp_j['gain']:.0f} m", f"{cmp_j['dist']:.0f} m", f"{cmp_j['mins']:.1f} min",
+            f"{cmp_j['hr']:.0f} bpm", f"{cmp_j['hrmax']:.0f} bpm", f"{cmp_j['vam']:.0f} m/h",
+            f"{cmp_j['pace']:.1f} min/km", f"{cmp_j['eff']:.1f} m/h·bpm", "~65% in (tired)"],
+        "May 1": [f"+{cmp_m['gain']:.0f} m", f"{cmp_m['dist']:.0f} m", f"{cmp_m['mins']:.1f} min",
+            f"{cmp_m['hr']:.0f} bpm", f"{cmp_m['hrmax']:.0f} bpm", f"{cmp_m['vam']:.0f} m/h",
+            f"{cmp_m['pace']:.1f} min/km", f"{cmp_m['eff']:.1f} m/h·bpm", "near start (fresh)"],
+    })
+    cmp_table
+    return cmp_J, cmp_M, cmp_j, cmp_m
+
+
+@app.cell(hide_code=True)
+def _(cmp_J, mo, records):
+    # Map: faint = full routes (grey Jun 7, blue May 1); bold red = the shared
+    # race climb (Strava "MdMB 2ème montée"). Green = bottom, red pin = top.
+    import folium
+    cmp_fullJ = records["18824580666"]; cmp_fullM = records["18330726193"]
+    cmp_map = folium.Map(
+        location=[float(cmp_J["position_lat_deg"].mean()), float(cmp_J["position_long_deg"].mean())],
+        zoom_start=15, tiles=None)
+    folium.TileLayer("OpenStreetMap").add_to(cmp_map)
+    folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+                     attr="OpenTopoMap", name="Terrain").add_to(cmp_map)
+    folium.PolyLine(cmp_fullJ[["position_lat_deg", "position_long_deg"]].dropna().values.tolist(),
+                    color="#777", weight=2.5, opacity=0.5, tooltip="Jun 7 — full route").add_to(cmp_map)
+    folium.PolyLine(cmp_fullM[["position_lat_deg", "position_long_deg"]].dropna().values.tolist(),
+                    color="#3b82f6", weight=2.5, opacity=0.45, tooltip="May 1 — full route").add_to(cmp_map)
+    folium.PolyLine(cmp_J[["position_lat_deg", "position_long_deg"]].values.tolist(),
+                    color="#e4513f", weight=6, opacity=0.95,
+                    tooltip="Shared race climb (compared)").add_to(cmp_map)
+    folium.Marker([cmp_J["position_lat_deg"].iloc[0], cmp_J["position_long_deg"].iloc[0]],
+        tooltip=f"Bottom ~{cmp_J['enhanced_altitude'].iloc[0]:.0f} m",
+        icon=folium.Icon(color="green", icon="play")).add_to(cmp_map)
+    folium.Marker([cmp_J["position_lat_deg"].iloc[-1], cmp_J["position_long_deg"].iloc[-1]],
+        tooltip=f"Top ~{cmp_J['enhanced_altitude'].iloc[-1]:.0f} m",
+        icon=folium.Icon(color="red", icon="flag")).add_to(cmp_map)
+    folium.LayerControl().add_to(cmp_map)
+    cmp_map.fit_bounds([
+        [float(cmp_J["position_lat_deg"].min()), float(cmp_J["position_long_deg"].min())],
+        [float(cmp_J["position_lat_deg"].max()), float(cmp_J["position_long_deg"].max())]])
+    mo.iframe(cmp_map._repr_html_(), height="460px")
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, cmp_J, cmp_M, cmp_j, cmp_m, mo, np, pd):
+    # HR vs altitude on the shared climb + the verdict.
+    _alts = np.linspace(max(cmp_J["enhanced_altitude"].iloc[0], cmp_M["enhanced_altitude"].iloc[0]),
+                        min(cmp_J["enhanced_altitude"].iloc[-1], cmp_M["enhanced_altitude"].iloc[-1]), 40)
+    def _hr_vs_alt(seg):
+        _o = seg.sort_values("enhanced_altitude")
+        return np.interp(_alts, _o["enhanced_altitude"], _o["heart_rate"])
+    cmp_curve = pd.concat([
+        pd.DataFrame({"altitude": _alts, "hr": _hr_vs_alt(cmp_J), "run": "Jun 7 (tired, 65% in)"}),
+        pd.DataFrame({"altitude": _alts, "hr": _hr_vs_alt(cmp_M), "run": "May 1 (fresh)"}),
+    ])
+    _chart = alt.Chart(cmp_curve).mark_line(point=True).encode(
+        x=alt.X("altitude:Q", title="Altitude (m)", scale=alt.Scale(zero=False)),
+        y=alt.Y("hr:Q", title="Heart rate (bpm)", scale=alt.Scale(zero=False)),
+        color=alt.Color("run:N", title=None,
+            scale=alt.Scale(domain=["Jun 7 (tired, 65% in)", "May 1 (fresh)"], range=["#e4513f", "#3b82f6"])),
+        tooltip=["run", alt.Tooltip("altitude:Q", format=".0f"), alt.Tooltip("hr:Q", format=".0f")],
+    ).properties(width=560, height=300, title="HR vs altitude — shared race climb (1424→1715 m)")
+
+    _verdict = mo.md(f"""
+    **On the identical race climb, Jun 7 was *not* the weaker effort:**
+
+    - Heart rate **{cmp_j['hr']:.0f} vs {cmp_m['hr']:.0f} bpm** — slightly **lower** on Jun 7.
+    - Slightly **faster**: {cmp_j['mins']:.1f} vs {cmp_m['mins']:.1f} min ({cmp_j['vam']:.0f} vs {cmp_m['vam']:.0f} m/h vertical).
+    - And this was **despite hitting the climb tired** (65 % into the run) vs fresh on May 1.
+
+    So on this lower climb (≤1715 m) the effort held up or improved — no sign of a
+    limiter here.
+
+    **The breathlessness was higher up.** This climb tops 1715 m, but on Jun 7 you carried
+    on to **1994 m**. Breathlessness that is *ventilatory* (air hunger at altitude) sits
+    alongside a normal/low HR rather than a high one — so it won't show on this lower
+    section. The next cells zoom in on that high ground.
+    """)
+    mo.vstack([_chart, _verdict])
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, mo, pd, records):
+    # Jun 7 FIRST climb — Argentière (1266 m) up to the 1994 m high point: the steep,
+    # high one where the breathlessness hit. HR (red) over the altitude profile (grey),
+    # with her Z4 (141) and Z5 (158) thresholds dashed. Wrist-optical HR is noisy when
+    # power-hiking, so read single-second dips with caution; the repeated threshold
+    # spikes at near-walking speed are the real signal.
+    cmp_climb = records["18824580666"].copy()
+    cmp_climb["km"] = cmp_climb["distance"] / 1000
+    cmp_climb = cmp_climb.loc[:cmp_climb["enhanced_altitude"].idxmax()].reset_index(drop=True)
+
+    _up = cmp_climb[cmp_climb["enhanced_altitude"] >= 1750]
+    _up_hr = _up["heart_rate"].mean()
+    _up_z4 = (_up["heart_rate"] >= 141).mean() * 100
+    _up_t = (_up["timestamp"].iloc[-1] - _up["timestamp"].iloc[0]).total_seconds() / 60
+
+    _base = alt.Chart(cmp_climb)
+    _altA = _base.mark_area(color="#cfc8b8", opacity=0.7).encode(
+        x=alt.X("km:Q", title="Distance (km)"),
+        y=alt.Y("enhanced_altitude:Q", title="Altitude (m)", scale=alt.Scale(zero=False)))
+    _hrL = _base.mark_line(color="#e4513f", strokeWidth=1.5).encode(
+        x="km:Q",
+        y=alt.Y("heart_rate:Q", title="Heart rate (bpm)", scale=alt.Scale(domain=[80, 170])))
+    _z4 = alt.Chart(pd.DataFrame({"y": [141]})).mark_rule(
+        color="#f97316", strokeDash=[5, 4]).encode(y="y:Q")
+    _z5 = alt.Chart(pd.DataFrame({"y": [158]})).mark_rule(
+        color="#ef4444", strokeDash=[5, 4]).encode(y="y:Q")
+    cmp_climb_chart = alt.layer(_altA, _hrL + _z4 + _z5).resolve_scale(
+        y="independent").properties(width=640, height=330,
+        title="Jun 7 first climb — HR (red) vs altitude (grey).  Dashed: Z4 141 · Z5 158")
+
+    _note = mo.md(f"""
+    **Above 1750 m** ({_up_t:.0f} min for the last +{_up['enhanced_altitude'].iloc[-1]-_up['enhanced_altitude'].iloc[0]:.0f} m,
+    ~22 min/km): HR averaged **{_up_hr:.0f}** but spiked to **{_up['heart_rate'].max():.0f}**, with
+    **{_up_z4:.0f}% of the time at Z4+ (≥141)** — a push-then-recover grind at near-walking pace.
+
+    Compare the **2ème montée lower down** (≤1715 m), where you held a smooth steady **154**.
+    The difference isn't fitness — it's that the limiter showed up **only up high**, which is the
+    **altitude / ventilation** signature, not a whole-day cardiac or anaemia one.
+    """)
+    mo.vstack([cmp_climb_chart, _note])
+    return (cmp_climb,)
+
+
+@app.cell(hide_code=True)
+def _(alt, cmp_climb, mo, pd):
+    # HR vs ALTITUDE on the Jun 7 first climb — does HR break at a specific height?
+    # Faint dots = every second; bold line = mean HR per 50 m band. Note HR peaks
+    # around 1700 m then FALLS toward the 1994 m summit while you keep climbing —
+    # the engine can't be driven up high (ventilation-limited), not an anaemia look.
+    cmp_band = cmp_climb.assign(band=(cmp_climb["enhanced_altitude"] // 50 * 50))
+    cmp_bin = cmp_band.groupby("band").agg(
+        hr=("heart_rate", "mean"), spd=("enhanced_speed", "mean")).reset_index()
+
+    _dots = alt.Chart(cmp_climb).mark_circle(size=14, opacity=0.22, color="#e4513f").encode(
+        x=alt.X("enhanced_altitude:Q", title="Altitude (m)", scale=alt.Scale(zero=False)),
+        y=alt.Y("heart_rate:Q", title="Heart rate (bpm)", scale=alt.Scale(domain=[90, 170])))
+    _meanl = alt.Chart(cmp_bin).mark_line(point=True, color="#b3271a", strokeWidth=3).encode(
+        x="band:Q", y="hr:Q",
+        tooltip=[alt.Tooltip("band:Q", title="alt"), alt.Tooltip("hr:Q", format=".0f"),
+                 alt.Tooltip("spd:Q", format=".2f", title="m/s")])
+    _z4 = alt.Chart(pd.DataFrame({"y": [141]})).mark_rule(color="#f97316", strokeDash=[5, 4]).encode(y="y:Q")
+    _z5 = alt.Chart(pd.DataFrame({"y": [158]})).mark_rule(color="#ef4444", strokeDash=[5, 4]).encode(y="y:Q")
+    cmp_hralt = (_dots + _meanl + _z4 + _z5).properties(width=640, height=340,
+        title="Jun 7 first climb — HR vs altitude (bold = 50 m mean).  Dashed: Z4 141 · Z5 158")
+
+    mo.vstack([cmp_hralt, mo.md(
+        "HR rises to **~148 by 1700 m**, then **declines** (136 → 131 → 122) as you push on to "
+        "1994 m — classic altitude ceiling: you're breathing hard but can't lift HR further.")])
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, mo, pd, records):
+    # Altitude theory, second day: Jun 7 (pushed hard) vs 29 May Posettes (easy hike,
+    # which went HIGHER, to 2192 m). Mean HR per 50 m band. At matched altitude they
+    # converge (~130 above 1750 m) and BOTH taper near the top — but on Posettes you
+    # rode an easy ~121 lower down, so it never felt like a struggle.
+    def _hr_bands(aid, lo=1400):
+        _d = records[aid]
+        _d = _d[_d["enhanced_altitude"] >= lo]
+        return (_d.assign(band=(_d["enhanced_altitude"] // 50 * 50))
+                  .groupby("band").agg(hr=("heart_rate", "mean")).reset_index())
+    cmp_two = pd.concat([
+        _hr_bands("18824580666").assign(run="Jun 7 — pushed (top 1994 m)"),
+        _hr_bands("18701189577").assign(run="29 May Posettes — easy (top 2192 m)"),
+    ])
+    cmp_two_chart = alt.Chart(cmp_two).mark_line(point=True, strokeWidth=2.5).encode(
+        x=alt.X("band:Q", title="Altitude (m)", scale=alt.Scale(zero=False)),
+        y=alt.Y("hr:Q", title="Mean HR (bpm)", scale=alt.Scale(zero=False)),
+        color=alt.Color("run:N", title=None, scale=alt.Scale(
+            domain=["Jun 7 — pushed (top 1994 m)", "29 May Posettes — easy (top 2192 m)"],
+            range=["#e4513f", "#2563eb"])),
+        tooltip=["run", "band", alt.Tooltip("hr:Q", format=".0f")],
+    ).properties(width=640, height=340, title="HR vs altitude — Jun 7 vs 29 May Posettes")
+
+    cmp_verdict2 = mo.md(f"""
+    ### Altitude test — verdict
+
+    - **Matched altitude + pace** (1750–1990 m, both ~0.8 m/s): HR **131 (Jun 7) ≈ 130 (Posettes)**.
+      Jun 7 was *not* running a high HR for the altitude — it lines up with another high day.
+    - **Both days HR tapers near the summit** — the altitude ceiling, not specific to Jun 7.
+    - The difference in *feel*: on Jun 7 you **pushed hard low down** (HR 141–148 at 1500–1750 m) then
+      hit that ceiling and got breathless; on Posettes you **cruised easy** (HR ~121) so it never bit.
+
+    **So: this reads as an altitude / ventilation + intensity effect.** The fix is specificity
+    and pacing — see the plan: put key long days up high, and climb from the bottom at an
+    even, conversational effort rather than going out hard low down.
+    """)
+    mo.vstack([cmp_two_chart, cmp_verdict2])
     return
 
 
