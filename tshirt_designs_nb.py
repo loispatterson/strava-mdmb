@@ -605,6 +605,138 @@ def _(np, pd, plt):
 
 
 @app.cell
+def _(IMAGES_DIR, np, os, pd, plt, requests):
+    # --- 2D route over satellite imagery ----------------------------------------
+    from PIL import Image
+    from io import BytesIO
+    from matplotlib.transforms import Affine2D
+
+    ESRI_EXPORT_URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/"
+                       "World_Imagery/MapServer/export")
+
+    def fetch_aerial(west: float, south: float, east: float, north: float,
+                     size_px: int = 1024) -> Image.Image:
+        """ESRI World Imagery PNG for a lat/lon bbox (no API key needed)."""
+        r = requests.get(ESRI_EXPORT_URL, params={
+            "bbox": f"{west},{south},{east},{north}",
+            "bboxSR": 4326, "imageSR": 4326,
+            "size": f"{size_px},{size_px}", "format": "png", "f": "image",
+        }, timeout=30)
+        r.raise_for_status()
+        return Image.open(BytesIO(r.content)).convert("RGB")
+
+
+    def make_course_aerial(course: pd.DataFrame, *,
+                           pad: float = 0.006, size_px: int = 1024,
+                           linewidth: float = 3.2,
+                           rotation_deg: float = 0.0, save: bool = False):
+        """2D route over satellite imagery, route coloured by elevation.
+
+        rotation_deg rotates the whole map COUNTER-clockwise. So:
+            0     north up           (default)
+           -45    NORTH-WEST up      (NW corner of the bbox points up)
+           +45    NORTH-EAST up
+        A small compass-rose inset shows where north ends up.
+        """
+        west  = course["lon"].min() - pad
+        east  = course["lon"].max() + pad
+        south = course["lat"].min() - pad
+        north = course["lat"].max() + pad
+
+        img = np.asarray(fetch_aerial(west, south, east, north, size_px))
+
+        # work in local metres so rotation is geographically correct (1 deg
+        # lat \u2248 111 km; 1 deg lon depends on latitude)
+        lat_ref = course["lat"].mean()
+        lon_ref = course["lon"].mean()
+        M_LAT = 111000.0
+        M_LON = 111000.0 * np.cos(np.radians(lat_ref))
+
+        def to_xy(lon, lat):
+            return (np.asarray(lon) - lon_ref) * M_LON, \
+                   (np.asarray(lat) - lat_ref) * M_LAT
+
+        fig = plt.figure(figsize=(11, 11))
+        fig.patch.set_facecolor("#16161c")
+        ax = fig.add_axes([0.05, 0.05, 0.78, 0.88])
+        ax.set_facecolor("#16161c")
+        rot = Affine2D().rotate_deg(rotation_deg) + ax.transData
+
+        # aerial floor — extent in pre-rotation metres, transform applies the spin
+        w_m, s_m = to_xy(west, south)
+        e_m, n_m = to_xy(east, north)
+        w_m, s_m, e_m, n_m = float(w_m), float(s_m), float(e_m), float(n_m)
+        ax.imshow(img, extent=(w_m, e_m, s_m, n_m), origin="upper",
+                  interpolation="bilinear", transform=rot, zorder=1)
+
+        # route coloured by elevation
+        lats = course["lat"].values
+        lons = course["lon"].values
+        eles = course["ele"].values
+        xr, yr = to_xy(lons, lats)
+        norm = (eles - eles.min()) / (eles.max() - eles.min())
+        for i in range(len(xr) - 1):
+            ax.plot(xr[i:i+2], yr[i:i+2],
+                    color=plt.cm.plasma(norm[i]),
+                    lw=linewidth, solid_capstyle="round",
+                    solid_joinstyle="round", zorder=4, transform=rot)
+
+        ax.scatter([xr[0]],  [yr[0]],  s=220, color="#22c55e",
+                   edgecolor="#16161c", linewidth=2, zorder=10,
+                   label="Start (Montroc)", transform=rot)
+        ax.scatter([xr[-1]], [yr[-1]], s=220, color="#e4513f", marker="s",
+                   edgecolor="#16161c", linewidth=2, zorder=10,
+                   label="Finish (Fl\u00e9g\u00e8re)", transform=rot)
+
+        # auto-fit axis limits to the rotated bbox + margin
+        a = np.radians(rotation_deg)
+        ca, sa = np.cos(a), np.sin(a)
+        cx = np.array([w_m, e_m, e_m, w_m])
+        cy = np.array([s_m, s_m, n_m, n_m])
+        rx = ca * cx - sa * cy
+        ry = sa * cx + ca * cy
+        m = (rx.max() - rx.min()) * 0.02
+        ax.set_xlim(rx.min() - m, rx.max() + m)
+        ax.set_ylim(ry.min() - m, ry.max() + m)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title("23 km du Mont-Blanc \u2014 route over satellite imagery",
+                     color="#f2ede1", fontsize=14, fontweight="bold", pad=12)
+
+        leg = ax.legend(loc="upper left", frameon=False, fontsize=10)
+        for t in leg.get_texts():
+            t.set_color("#f2ede1")
+
+        # compass-rose inset showing where north ends up after rotation
+        comp = fig.add_axes([0.78, 0.84, 0.08, 0.08])
+        comp.set_facecolor("#16161c")
+        comp.set_xlim(-1.2, 1.2); comp.set_ylim(-1.2, 1.2)
+        comp.set_aspect("equal"); comp.axis("off")
+        n_dx, n_dy = -np.sin(a), np.cos(a)   # where (0,1) maps under the rotation
+        comp.annotate("", xy=(n_dx, n_dy), xytext=(0, 0),
+                      arrowprops=dict(arrowstyle="-|>", color="#f2ede1", lw=2.2))
+        comp.text(n_dx * 1.55, n_dy * 1.55, "N", color="#f2ede1",
+                  fontsize=13, fontweight="bold", ha="center", va="center")
+
+        # elevation colour bar
+        cax = fig.add_axes([0.88, 0.22, 0.025, 0.55])
+        sm = plt.cm.ScalarMappable(cmap=plt.cm.plasma,
+                                   norm=plt.Normalize(eles.min(), eles.max()))
+        cb = fig.colorbar(sm, cax=cax)
+        cb.set_label("Elevation (m)", color="#f2ede1")
+        cb.outline.set_edgecolor("#333")
+        cb.ax.yaxis.set_tick_params(color="#f2ede1")
+        plt.setp(cb.ax.get_yticklabels(), color="#f2ede1")
+
+        if save:
+            fig.savefig(os.path.join(IMAGES_DIR, "course_aerial.png"),
+                        dpi=170, facecolor="#16161c", bbox_inches="tight")
+        return fig
+
+    return (make_course_aerial,)
+
+
+@app.cell
 def _(IMAGES_DIR, np, os, plt):
     # --- variants of the routes plot --------------------------------------------
     # Two new designs that reuse the same month-colour scheme as the grid:
@@ -727,7 +859,7 @@ def _(
     routes_2025, streams_2025 = load_streams_2025(strava)
     print(f"{len(strava)} activities  ·  {len(records)} streams  ·  "
           f"course {course['dist_km'].iloc[-1]:.1f} km")
-    return routes_2025, strava, streams_2025
+    return course, routes_2025, strava, streams_2025
 
 
 @app.cell
@@ -809,6 +941,14 @@ def _(make_routes_random, routes_2025, streams_2025):
 def _(make_routes_spirograph, routes_2025, streams_2025):
     # Render — every 2025 route, fanning out from a common centre.
     make_routes_spirograph(routes_2025, streams_2025)
+    return
+
+
+@app.cell
+def _(course, make_course_aerial):
+    # Render with NorthWest pointing straight up (rotation_deg = -45).
+    # Pass rotation_deg=0 for north-up, +45 for NE-up, etc.
+    make_course_aerial(course, rotation_deg=135)
     return
 
 
