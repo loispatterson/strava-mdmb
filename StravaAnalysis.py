@@ -423,9 +423,9 @@ def _(mo):
     mo.md("""
     # Strava / Garmin training analysis 2026
 
-    On the 28th June 2026, I'm running the Marathon du Mont Blanc 23 km. I began to wonder if I was doing the right training and getting any fitter. Since there is such a lot of vertical in the race which I can't actually run, it is very hard to tell.
+    On the 27th June 2026, I'm running the Marathon du Mont Blanc 23 km. I began to wonder if I was doing the right training and getting any fitter. Since there is such a lot of vertical in the race which I can't actually run, it is very hard to tell.
 
-    Now before you judge me, I am a very long way from being any kind of elite althlete. Think active person with a lot of other things going on. All I know is that I am going further, I will finish the race and I'm sure training could be improved.
+    Now before you judge me, I am a very long way from being any kind of elite athlete. Think active person with a lot of other things going on. All I know is that I am going further, I will finish the race and I'm sure training could be improved.
 
     I thought I would use this goal as an opportunity to see what Marimo is like and code pair with Claude. Also, with all the tools we now have available, why can't the average person get personalised traning for free.
 
